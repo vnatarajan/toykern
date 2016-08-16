@@ -19,7 +19,7 @@ main(void)
 	{
 		void *ptr[10] = {0};
 
-		memInit(space, 610+(32*3)); /* 32 is sizeof(mcb_t) */
+		memInit(space, 610+(48*3)); /* 48 is sizeof(mcb_t) */
 		ptr[0] = memAlloc(100);
 		ptr[1] = memAlloc(200);
 		ptr[2] = memAlloc(300);
