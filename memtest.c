@@ -10,16 +10,18 @@
 
 #include <mem.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 char space[1*1024*1024];
 
 int
 main(void)
 {
+	srandom(getpid());
 	{
-		void *ptr[10] = {0};
+		void *ptr[4] = {0};
 
-		memInit(space, 610+(48*3)); /* 48 is sizeof(mcb_t) */
+		memInit(space, 610+(32*3)); /* 32 is sizeof(mcb_t) */
 		ptr[0] = memAlloc(100);
 		ptr[1] = memAlloc(200);
 		ptr[2] = memAlloc(300);
@@ -52,7 +54,7 @@ main(void)
 		for(i=0; i<100000; i++) {
 			idx = random() % 1000;
 			if (ptr[idx] == 0) {
-				sz = random() % 1000;
+				sz = random() % 10000;
 				ptr[idx] = memAlloc(sz);
 			} else {
 				memFree(ptr[idx]);

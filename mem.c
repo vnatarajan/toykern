@@ -28,14 +28,10 @@ typedef struct mcb_ {
 	struct	mcb_	*prev;	/* Preceeding memory block - may be free or
 				 * in-use.
 				 */
-	struct	mcb_	*next;	/* Succeeding memory block - may be free or
-				 * in-use.
-				 */
 	struct	mcb_	*larger;
 	struct	mcb_	*smaller;
 	uint32_t	magic;	/* Magic# and also flag indicating in-use or free */
 	int	size;		/* Size of memory region */
-	void	*addr;		/* Start address of memory given to user */
 } mcb_t;
 
 /* Minimum size of a free block (including MCB overhead) */
@@ -47,10 +43,57 @@ mcb_t	*mcb;	/* Linked-list of MCBs - free and used */
  * efficient to merge freed blocks into a larger sized free block.
  */
 
+mcb_t	*endMem;	/* Address denoting end of memory */
+
 mcb_t	*freelist;	/* Linked-list of free MCBs */
 /* "freelist" is a linked-list with entries in decreasing order of
  * size of the memory blocks.
  */
+
+/**
+ * @brief
+ * Get the addr of the MCB structure of the immediate next memory block.
+ *
+ * @param[in]
+ *       m: Pointer to MCB whose next memory block MCB addr is needed.
+ *
+ * @param[out]
+ *       None.
+ *
+ * @return
+ *       - Success : Pointer to MCB of next memory block
+ *       - Failure : NULL
+ */
+mcb_t *
+mcbNext(mcb_t *m)
+{
+	mcb_t *next;
+
+	next = (mcb_t *) ((char *) m + sizeof(*m) + m->size);
+	if (next == endMem) {
+		next = NULL;
+	}
+	return next;
+}
+
+/**
+ * @brief
+ * Get the address of memory area for use by user.
+ *
+ * @param[in]
+ *       m: Pointer to MCB whose usable memory address is needed.
+ *
+ * @param[out]
+ *       None.
+ *
+ * @return
+ *       - Pointer to memory address for user's use.
+ */
+void *
+mcbAddr(mcb_t *m)
+{
+	return (void *) ((char *) m + sizeof(*m));
+}
 
 /**
  * @brief
@@ -144,7 +187,7 @@ removeFree(mcb_t *m)
 static void
 sanityCheck(void)
 {
-	mcb_t *m;
+	mcb_t *m, *next;
 
 	m = mcb;
 	while (m) {
@@ -157,12 +200,13 @@ sanityCheck(void)
 			assert(0);
 		}
 		/* Address in successive MCBs must be increasing. */
-		if (m->next && (m->next->addr <= m->addr)) {
+		next = mcbNext(m);
+		if (next && (next <= m)) {
 			assert(0);
 		}
 		/* Check if linked-list prev/next are sane. */
 		if (m->prev) {
-			if (m->prev->next != m) {
+			if (mcbNext(m->prev) != m) {
 				assert(0);
 			}
 		} else {
@@ -170,8 +214,8 @@ sanityCheck(void)
 				assert(0);
 			}
 		}
-		if (m->next) {
-			if (m->next->prev != m) {
+		if (next) {
+			if (next->prev != m) {
 				assert(0);
 			}
 		}
@@ -208,11 +252,11 @@ sanityCheck(void)
 			if (m->prev && (m->prev->magic != MAGIC_USED)) {
 				assert(0);
 			}
-			if (m->next && (m->next->magic != MAGIC_USED)) {
+			if (next && (next->magic != MAGIC_USED)) {
 				assert(0);
 			}
 		}
-		m = m->next;
+		m = next;
 	}
 
 	m = freelist;
@@ -272,12 +316,11 @@ memInit(void *addr, int size)
 
 	/* Mark entire region as free. */
 	m = (mcb_t *) addr;
-	m->addr = (char *) m + sizeof(*m);
 	m->size = size - sizeof(mcb_t);
 	m->magic = MAGIC_FREE;
 	m->prev = NULL;
-	m->next = NULL;
 	mcb = m;
+	endMem = (mcb_t *) ((char *) addr + size);
 	freelist = NULL;
 	insertFree(m);
 #ifdef UNIT_TEST
@@ -310,7 +353,7 @@ memInit(void *addr, int size)
 void *
 memAlloc(int size)
 {
-	mcb_t	*m, *n;
+	mcb_t	*m, *n, *next;
 	int	balance;
 
 	/* Align size to size of integer */
@@ -332,20 +375,18 @@ memAlloc(int size)
 	 */
 	if (balance > MIN_FREE_BLOCK) {
 		/* Create a new free block of smaller size */
-		n = (mcb_t *) ((char *) m->addr + size);
+		n = (mcb_t *) ((char *) mcbAddr(m) + size);
 		n->prev = m;
-		n->next = m->next;
-		if (n->next) {
-			n->next->prev = n;
+		next = mcbNext(m);
+		if (next) {
+			next->prev = n;
 		}
 		n->magic = MAGIC_FREE;
-		n->addr = (char *) n + sizeof(*n);
 		n->size = balance - sizeof(*m);
 		n->smaller = n->larger = NULL;
 		insertFree(n);
 	} else {
 		/* Allocate this whole block. */
-		n = m->next;
 		size = size + balance;
 	}
 
@@ -353,12 +394,11 @@ memAlloc(int size)
 
 	/* Mark current block as in use. */
 	m->magic = MAGIC_USED;
-	m->next = n;
 	m->size = size; /* Set to size allocated */
 #ifdef UNIT_TEST
 	sanityCheck();
 #endif /* UNIT_TEST */
-	return (m->addr);
+	return (mcbAddr(m));
 }
 
 /**
@@ -383,7 +423,7 @@ memAlloc(int size)
 void
 memFree(void *addr)
 {
-	mcb_t	*m;
+	mcb_t	*m, *next, *nnext;
 
 	if (!addr) return;
 
@@ -405,9 +445,9 @@ memFree(void *addr)
 		if (m->prev && (m->prev->magic == MAGIC_FREE)) {
 			m->magic = 0;
 			m->prev->size += m->size + sizeof(*m);
-			m->prev->next = m->next;
-			if (m->next) {
-				m->next->prev = m->prev;
+			next = mcbNext(m);
+			if (next) {
+				next->prev = m->prev;
 			}
 			m = m->prev;
 			/* Since size of 'm' is increased, put it back
@@ -420,14 +460,15 @@ memFree(void *addr)
 		}
 
 		/* Merge with succeeding block, if possible */
-		if (m->next && (m->next->magic == MAGIC_FREE)) {
-			removeFree(m->next);
-			m->next->magic = 0;
-			m->size += sizeof(*m) + m->next->size;
-			if (m->next->next) {
-				m->next->next->prev = m;
+		next = mcbNext(m);
+		if (next && (next->magic == MAGIC_FREE)) {
+			removeFree(next);
+			next->magic = 0;
+			m->size += sizeof(*m) + next->size;
+			nnext = mcbNext(next);
+			if (nnext) {
+				nnext->prev = m;
 			}
-			m->next = m->next->next;
 			/* Since size of 'm' is increased, put it back
 			 * into freelist in sorted order.
 			 */
