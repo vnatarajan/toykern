@@ -28,14 +28,20 @@ typedef struct mcb_ {
 	struct	mcb_	*prev;	/* Preceeding memory block - may be free or
 				 * in-use.
 				 */
-	struct	mcb_	*larger;
-	struct	mcb_	*smaller;
-	uint32_t	magic;	/* Magic# and also flag indicating in-use or free */
+	uint32_t	magic;	/* Magic# and flag indicating in-use/free */
 	int	size;		/* Size of memory region */
 } mcb_t;
 
+/* Links used by MCBs in the freelist. This info is kept in the user data
+ * area of the memory block in order to keep size of MCB to minimum.
+ */
+typedef struct freelist_links_ {
+	struct	mcb_	*larger;
+	struct	mcb_	*smaller;
+} freelist_links_t;
+
 /* Minimum size of a free block (including MCB overhead) */
-#define MIN_FREE_BLOCK	(sizeof(mcb_t) + 16)
+#define MIN_FREE_BLOCK	(sizeof(mcb_t) + sizeof(freelist_links_t))
 
 mcb_t	*mcb;	/* Linked-list of MCBs - free and used */
 /* "mcb" is a linked-list with entries in increasing order of address.
@@ -119,24 +125,29 @@ static void
 insertFree(mcb_t *m)
 {
 	mcb_t *l, *s;
+	freelist_links_t *mf, *lf, *sf;
 
 	/* Find where to insert 'm'. */
 	l = NULL;
 	s = freelist;
 	while (s && (m->size < s->size)) {
 		l = s;
-		s = s->smaller;
+		sf = mcbAddr(s);
+		s = sf->smaller;
 	}
 	/* Insert 'm' between 'l' and 's'. */
-	m->larger = l;
+	mf = mcbAddr(m);
+	mf->larger = l;
 	if (l) {
-		l->smaller = m;
+		lf = mcbAddr(l);
+		lf->smaller = m;
 	} else {
 		freelist = m;
 	}
-	m->smaller = s;
+	mf->smaller = s;
 	if (s) {
-		s->larger = m;
+		sf = mcbAddr(s);
+		sf->larger = m;
 	}
 	return;
 }
@@ -157,15 +168,20 @@ insertFree(mcb_t *m)
 static void
 removeFree(mcb_t *m)
 {
-	if (m->smaller) {
-		m->smaller->larger = m->larger;
+	freelist_links_t *mf, *f;
+
+	mf = mcbAddr(m);
+	if (mf->smaller) {
+		f = mcbAddr(mf->smaller);
+		f->larger = mf->larger;
 	}
-	if (m->larger) {
-		m->larger->smaller = m->smaller;
+	if (mf->larger) {
+		f = mcbAddr(mf->larger);
+		f->smaller = mf->smaller;
 	} else {
-		freelist = m->smaller;
+		freelist = mf->smaller;
 	}
-	m->smaller = m->larger = NULL;
+	mf->smaller = mf->larger = NULL;
 	return;
 }
 
@@ -188,9 +204,11 @@ static void
 sanityCheck(void)
 {
 	mcb_t *m, *next;
+	freelist_links_t *mf, *f;
 
 	m = mcb;
 	while (m) {
+		mf = mcbAddr(m);
 		/* MCB must have a valid magic#. */
 		if ((m->magic != MAGIC_USED) && (m->magic != MAGIC_FREE)) {
 			assert(0);
@@ -219,33 +237,29 @@ sanityCheck(void)
 				assert(0);
 			}
 		}
-		/* An MCB in use must not be in freelist. */
-		if ((m->magic == MAGIC_USED) && (m->larger || m->smaller)) {
-			assert(0);
-		}
 		if (m->magic == MAGIC_FREE) {
 			/* If no MCB is larger than this one, it must be at
 			 * head of freelist.
 			 */
-			if (!m->larger && (freelist != m)) {
+			if (!mf->larger && (freelist != m)) {
 				assert(0);
 			}
-			if (m->larger) {
-				if (m->larger->magic != MAGIC_FREE) {
+			if (mf->larger) {
+				if (mf->larger->magic != MAGIC_FREE) {
 					assert(0);
 				}
 			}
-			if (m->smaller) {
-				if (m->smaller->magic != MAGIC_FREE) {
+			if (mf->smaller) {
+				if (mf->smaller->magic != MAGIC_FREE) {
 					assert(0);
 				}
 			}
 			/* The larger MCB must have a larger (or same) size */
-			if (m->larger && (m->larger->size < m->size)) {
+			if (mf->larger && (mf->larger->size < m->size)) {
 				assert(0);
 			}
 			/* The smaller MCB must have smaller (or same) size */
-			if (m->smaller && (m->smaller->size > m->size)) {
+			if (mf->smaller && (mf->smaller->size > m->size)) {
 				assert(0);
 			}
 			/* The must not be 2 contiguous free memory blocks. */
@@ -261,22 +275,25 @@ sanityCheck(void)
 
 	m = freelist;
 	while (m) {
+		mf = mcbAddr(m);
 		if (m->magic != MAGIC_FREE) {
 			assert(0);
 		}
-		if (m->smaller) {
-			if (m->smaller->magic != MAGIC_FREE) {
+		if (mf->smaller) {
+			if (mf->smaller->magic != MAGIC_FREE) {
 				assert(0);
 			}
-			if (m->size < m->smaller->size) {
+			if (m->size < mf->smaller->size) {
 				assert(0);
 			}
-			if (m->smaller->larger != m) {
+			f = mcbAddr(mf->smaller);
+			if (f->larger != m) {
 				assert(0);
 			}
 		}
-		if (m->larger) {
-			if (m->larger->smaller != m) {
+		if (mf->larger) {
+			f = mcbAddr(mf->larger);
+			if (f->smaller != m) {
 				assert(0);
 			}
 		} else {
@@ -284,7 +301,7 @@ sanityCheck(void)
 				assert(0);
 			}
 		}
-		m = m->smaller;
+		m = mf->smaller;
 	}
 
 	return;
@@ -354,8 +371,15 @@ void *
 memAlloc(int size)
 {
 	mcb_t	*m, *n, *next;
+	freelist_links_t *nf;
 	int	balance;
 
+	/* Any memory block must be able to hold the links needed for
+	 * memory block in freelist.
+	 */
+	if (size < sizeof(freelist_links_t)) {
+		size = sizeof(freelist_links_t);
+	}
 	/* Align size to size of integer */
 	size = (size + sizeof(int) - 1) & ~(sizeof(int) - 1);
 
@@ -383,7 +407,8 @@ memAlloc(int size)
 		}
 		n->magic = MAGIC_FREE;
 		n->size = balance - sizeof(*m);
-		n->smaller = n->larger = NULL;
+		nf = mcbAddr(n);
+		nf->smaller = nf->larger = NULL;
 		insertFree(n);
 	} else {
 		/* Allocate this whole block. */
@@ -424,6 +449,7 @@ void
 memFree(void *addr)
 {
 	mcb_t	*m, *next, *nnext;
+	freelist_links_t *mf;
 
 	if (!addr) return;
 
@@ -440,6 +466,8 @@ memFree(void *addr)
 	if (m) {
 		/* Mark block as free */
 		m->magic = MAGIC_FREE;
+		mf = mcbAddr(m);
+		mf->smaller = mf->larger = NULL;
 
 		/* Merge with preceeding block, if possible */
 		if (m->prev && (m->prev->magic == MAGIC_FREE)) {
